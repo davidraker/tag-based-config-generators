@@ -1,10 +1,12 @@
+import copy
 import datetime
 import json
 import os.path
-import sys
-from abc import abstractmethod
-import copy
 import shutil
+import sys
+
+from abc import abstractmethod, ABCMeta
+from collections import defaultdict
 from typing import Tuple
 
 from volttron_config_gen.utils import strip_comments
@@ -12,7 +14,7 @@ from volttron_config_gen.utils.ilc.validate_pairwise import extract_criteria as 
     validate_input as pairwise_validate_input, calc_column_sums as pairwise_calc_column_sums
 
 
-class BaseConfigGenerator:
+class BaseConfigGenerator(metaclass=ABCMeta):
     """
     Base class that parses semantic tags to generate
     ILC agent configurations based on a configuration templates
@@ -240,7 +242,7 @@ class BaseConfigGenerator:
                                                               "config": file_path})
 
     def generate_control_and_criteria_config(self, device_types):
-
+        print('IN GENERATE_CONTROL_AND_CRITERIA_CONFIG')
         for device_type in device_types:
             # sort the list of point before doing find and replace of volttron point name with actual point names
             # so that we avoid matching substrings. For example find and replace ZoneAirFlowSetpoint before ZoneAirFlow
@@ -256,8 +258,33 @@ class BaseConfigGenerator:
             mappers = self.config_template.get('mapper_config', {})
             volttron_point_types = [x for x in self.point_meta_map[device_type]]
             volttron_point_types.sort(key=len)
-            control_config = dict()
-            criteria_config = dict()
+            control_config = defaultdict(dict)
+            criteria_config = defaultdict(dict)
+            print(f'DEVICE TYPE IS: {device_type}')
+            if 'rtu' in device_type:
+                print('IN RTU')
+                for stage, rtu_topic in self.get_rtus():
+                    print(f'STAGE: {stage}, rtu_topic: {rtu_topic}')
+                    config = copy.deepcopy(control_template)
+                    curtail_config = {"device_topic": ""}
+                    curtail_config.update(copy.deepcopy(criteria_template))
+                    config["device_topic"] = curtail_config["device_topic"] = rtu_topic
+                    point_mapping, missing_rtu_points = self.get_point_mapping(device_type, rtu_topic,
+                                                                               volttron_point_types, stage=stage)
+                    print(f'POINT MAPPING: {point_mapping}')
+                    # if missing_rtu_points:
+                    #     # some points are missing, details in umapped_device_details skip vav and move to next
+                    #     self.unmapped_device_details[rtu_topic] = {
+                    #         "type": device_type,
+                    #         "error": f"Unable to find point(s) using using metadata field {self.point_meta_field}."
+                    #                  f" Missing points and their configured mapping: {missing_rtu_points}"
+                    #     }
+                    #     continue
+
+                    # If all necessary points are found go ahead and add it to control config
+                    control_config[rtu_topic].update({stage: self.update_control_config(config, point_mapping)})
+                    criteria_config[rtu_topic].update({stage: self.update_criteria_config(curtail_config, point_mapping)})
+
             if device_type == "vav":
                 vav_details = self.get_vav_ahu_map()
                 if isinstance(vav_details, dict):
@@ -281,17 +308,16 @@ class BaseConfigGenerator:
 
                     if missing_vav_points:
                         # some points are missing, details in umapped_device_details skip vav and move to next
-                        self.unmapped_device_details[vav_id] = {"type": device_type,
-                            "error": f"Unable to find point(s) using using metadata field "
-                                     f"{self.point_meta_field}. Missing "
-                                     f"points and their configured mapping: {missing_vav_points}"}
+                        self.unmapped_device_details[vav_id] = {
+                            "type": device_type,
+                            "error": f"Unable to find point(s) using using metadata field {self.point_meta_field}."
+                                     f" Missing points and their configured mapping: {missing_vav_points}"
+                        }
                         continue
 
                     # If all necessary points are found go ahead and add it to control config
-                    control_config[vav_topic] = {vav: self.update_control_config(config,
-                                                                                 point_mapping)}
-                    criteria_config[vav_topic] = {vav: self.update_criteria_config(curtail_config,
-                                                                                   point_mapping)
+                    control_config[vav_topic] = {vav: self.update_control_config(config, point_mapping)}
+                    criteria_config[vav_topic] = {vav: self.update_criteria_config(curtail_config, point_mapping)
                                                   }
             elif device_type == "lighting":
                 room_lights = self.get_lights_by_room()
@@ -374,14 +400,21 @@ class BaseConfigGenerator:
 
     def get_point_mapping(self, device_type, device_id, volttron_point_types, **kwargs) -> Tuple[
         dict,list]:
+        device_name = self.get_name_from_id(device_id)
         point_mapping = dict()
         missing_points = []
         # get vav point name
         for volttron_point_type in volttron_point_types:
             point_name = self.get_point_name(device_id, device_type, volttron_point_type, **kwargs)
-            if not point_name and self.point_default_map.get(device_type):
+            if not point_name and (point_default_map := self.point_default_map.get(device_type, {})):
                 # see if there is a default
-                point_name = self.point_default_map.get(volttron_point_type, "")
+                point_name = point_default_map.get(volttron_point_type, "")
+                if isinstance(point_name, str):
+                    point_name = self.apply_template(point_name, device_id, device_type, device_name,
+                                                     self.point_meta_map[device_type])
+                else:
+                    point_name = [self.apply_template(p, device_id, device_type, device_name,
+                                                      self.point_meta_map[device_type]) for p in point_name]
             if point_name:
                 point_mapping[volttron_point_type] = point_name
             else:
@@ -391,6 +424,11 @@ class BaseConfigGenerator:
                                       f"({self.point_meta_map[device_type][volttron_point_type]})")
         return point_mapping, missing_points
 
+
+    @staticmethod
+    def apply_template(point_name, device_id, device_type, device_name, meta_map, **kwargs):
+        return point_name.format(device_id=device_id, device_type=device_type, device_name=device_name,
+                                 **meta_map, **kwargs)
 
     def update_control_config(self, config, point_mapping, room_id=None, lights=None,
                               occ_detector=None, occ_mapping=None):
@@ -501,7 +539,10 @@ class BaseConfigGenerator:
             for point in volttron_point_list:
                 point = point.strip()
                 try:
-                    condition = condition.replace(point, point_mapping[point])
+                    mapped_point = point_mapping[point]
+                    if isinstance(mapped_point, list):
+                        mapped_point = mapped_point[1]
+                    condition = condition.replace(point, mapped_point)
                 except Exception as e:
                     raise Exception(f"Exception replacing point names in curtail conditions {e}")
             updated_conditions.append(condition)
@@ -617,6 +658,15 @@ class BaseConfigGenerator:
                  {'vav1':'ahu1', 'vav2':'ahu1',...}
         """
         pass
+
+    @abstractmethod
+    def get_rtus(self):
+        """
+        :return: list of tuples with the format [(stage1, rtu1), (stage2, rtu1),...]
+                    or dict mapping rtu stage to rtu with format
+                    {'stage1':'rtu1', 'stage2':'rtu1',...}
+            .
+        """
 
     def get_lights_by_room(self):
         # not all implementation might have lighting info
