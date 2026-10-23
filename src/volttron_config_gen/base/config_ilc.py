@@ -1,5 +1,6 @@
 import copy
 import datetime
+import time
 import json
 import os.path
 import shutil
@@ -102,7 +103,8 @@ class BaseConfigGenerator(metaclass=ABCMeta):
         """
         Generated all configuration files for ILC agent for a given site
         """
-        st = datetime.datetime.utcnow()
+        st = datetime.datetime.now(datetime.timezone.utc)
+        started = time.perf_counter()
         print(f"Starting generation at {st}")
         device_types = self.config_template["control_config"].keys()
 
@@ -115,8 +117,8 @@ class BaseConfigGenerator(metaclass=ABCMeta):
         if "lighting" in device_types:
             self.generate_generate_lighting_actuator_config()
 
-        et = datetime.datetime.utcnow()
-        print(f"Done with config generation. end time is {et} time taken {et-st}")
+        et = datetime.datetime.now(datetime.timezone.utc)
+        print(f"Done with config generation. end time is {et} time taken {datetime.timedelta(seconds=time.perf_counter() - started)}")
         if self.config_metadata_dict[self.ilc_agent_vip]:
             config_metafile_name = f"{self.output_dir}/config_metadata.json"
             with open(config_metafile_name, 'w') as f:
